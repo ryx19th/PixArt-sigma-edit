@@ -1,5 +1,5 @@
 _base_ = ['../PixArt_xl2_internal.py']
-data_root = 'data/pixart-sigma-toy-dataset'
+data_root = 'data/anyedit'
 image_list_json = ['data_info.json']
 
 data = dict(
@@ -21,23 +21,23 @@ pe_interpolation = 1.0
 
 # training setting
 num_workers = 10
-train_batch_size = 2  # 48 as default
-num_epochs = 10  # 3
+train_batch_size = 48
+num_epochs = 100
 gradient_accumulation_steps = 1
 grad_checkpointing = True
 gradient_clip = 0.01
 optimizer = dict(type='CAMEWrapper', lr=2e-5, weight_decay=0.0, betas=(0.9, 0.999, 0.9999), eps=(1e-30, 1e-16))
 lr_schedule_args = dict(num_warmup_steps=1000)
 
-eval_sampling_steps = 500
+eval_sampling_steps = 50
 visualize = True
-log_interval = 20
-save_model_epochs = 5
-save_model_steps = 2500
-work_dir = 'output/debug'
+log_interval = 5
+save_model_epochs = 10
+save_model_steps = 100
+work_dir = 'output/anyedit'
 
 # pixart-sigma
 scale_factor = 0.13025
-real_prompt_ratio = 0.5
+real_prompt_ratio = 1.0
 model_max_length = 300
 class_dropout_prob = 0.1

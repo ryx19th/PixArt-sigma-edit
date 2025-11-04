@@ -31,6 +31,8 @@ from diffusion.utils.lr_scheduler import build_lr_scheduler
 from diffusion.utils.misc import set_random_seed, read_config, init_random_seed, DebugUnderflowOverflow
 from diffusion.utils.optimizer import build_optimizer, auto_scale_lr
 
+from ipdb import set_trace as st
+
 warnings.filterwarnings("ignore")  # ignore warning
 
 
@@ -122,12 +124,128 @@ def log_validation(model, step, device, vae=None):
     return image_logs
 
 
+@torch.inference_mode()
+def log_validation_edit(model, step, device, vae=None):
+    # st()
+    torch.cuda.empty_cache()
+    model = accelerator.unwrap_model(model).eval()
+    null_y = torch.load(f'output/pretrained_models/null_embed_diffusers_{max_length}token.pth')
+    null_y = null_y['uncond_prompt_embeds'].to(device)
+
+    # Create sampling noise:
+    logger.info("Running validation (edit mode)... ")
+    image_logs = []
+    latents = []
+
+    load_vae_feat = getattr(test_dataloader.dataset, 'load_vae_feat', False)
+    load_t5_feat = getattr(test_dataloader.dataset, 'load_t5_feat', False)
+
+    for batch in test_dataloader: break 
+    assert not load_vae_feat
+    with torch.no_grad():
+        with torch.cuda.amp.autocast(enabled=(config.mixed_precision == 'fp16' or config.mixed_precision == 'bf16')):
+            cond_posterior = vae.encode(batch[-1]).latent_dist 
+            if config.sample_posterior:
+                cond_z = cond_posterior.sample()
+            else:
+                cond_z = cond_posterior.mode()
+
+    clean_images_rgb = batch[0]
+    cond_images_rgb = batch[-1]
+    cond_images = cond_z * config.scale_factor
+    data_info = batch[3]
+
+    if load_t5_feat:
+        y = batch[1]
+        y_mask = batch[2]
+    else:
+        with torch.no_grad():
+            txt_tokens = tokenizer(
+                batch[1], max_length=max_length, padding="max_length", truncation=True, return_tensors="pt"
+            ).to(accelerator.device)
+            y = text_encoder(
+                txt_tokens.input_ids, attention_mask=txt_tokens.attention_mask)[0][:, None]
+            y_mask = txt_tokens.attention_mask[:, None]
+
+    # st()
+
+    for i in range(len(validation_prompts)):
+        if validation_noise is not None:
+            z = torch.clone(validation_noise).to(device)
+        else:
+            z = torch.randn(1, 4, latent_size, latent_size, device=device)
+        model_kwargs = dict(data_info={'img_hw': data_info['img_hw'][i][None], 'aspect_ratio': data_info['aspect_ratio'][i][None, None]}, mask=y_mask[i], cond_image=cond_images[i][None].repeat(2, 1, 1, 1)  )
+
+        dpm_solver = DPMS(model.forward_with_dpmsolver,
+                          condition=y[i],
+                          uncondition=null_y,
+                          cfg_scale=4.5,
+                          model_kwargs=model_kwargs)
+        denoised = dpm_solver.sample(
+            z,
+            steps=14,
+            order=2,
+            skip_type="time_uniform",
+            method="multistep",
+        )
+        latents.append(denoised)
+
+    # st()
+
+    torch.cuda.empty_cache()
+    if vae is None:
+        vae = AutoencoderKL.from_pretrained(config.vae_pretrained).to(accelerator.device).to(torch.float16)
+    for i in range(len(validation_prompts)):
+        prompt = batch[1][i]
+        latent = latents[i]
+        latent = latent.to(torch.float16)
+        samples = vae.decode(latent.detach() / vae.config.scaling_factor).sample
+        samples = torch.clamp(127.5 * samples + 128.0, 0, 255).permute(0, 2, 3, 1).to("cpu", dtype=torch.uint8).numpy()[0]
+        image = Image.fromarray(samples)
+        src_image = Image.fromarray(torch.clamp(127.5 * cond_images_rgb[i] + 128.0, 0, 255).permute(1, 2, 0).to("cpu", dtype=torch.uint8).numpy())
+        gt_image = Image.fromarray(torch.clamp(127.5 * clean_images_rgb[i] + 128.0, 0, 255).permute(1, 2, 0).to("cpu", dtype=torch.uint8).numpy())
+        image_logs.append({"validation_prompt": prompt, "images": [src_image, image, gt_image] })
+
+    for tracker in accelerator.trackers:
+        if tracker.name == "tensorboard":
+            for log in image_logs:
+                images = log["images"]
+                validation_prompt = log["validation_prompt"]
+                formatted_images = []
+                for image in images:
+                    formatted_images.append(np.asarray(image))
+
+                formatted_images = np.stack(formatted_images)
+
+                tracker.writer.add_images(validation_prompt, formatted_images, step, dataformats="NHWC")
+        elif tracker.name == "wandb":
+            import wandb
+            formatted_images = []
+
+            for log in image_logs:
+                images = log["images"]
+                validation_prompt = log["validation_prompt"]
+                for image in images:
+                    image = wandb.Image(image, caption=validation_prompt)
+                    formatted_images.append(image)
+
+            tracker.log({"validation": formatted_images})
+        else:
+            logger.warn(f"image logging not implemented for {tracker.name}")
+
+    del vae
+    flush()
+    return image_logs
+
+
 def train():
     if config.get('debug_nan', False):
         DebugUnderflowOverflow(model)
         logger.info('NaN debugger registered. Start to detect overflow during training.')
     time_start, last_tic = time.time(), time.time()
     log_buffer = LogBuffer()
+
+    # edit_mode = config.get('edit_mode', False)
 
     global_step = start_step + 1
 
@@ -151,8 +269,16 @@ def train():
                             z = posterior.sample()
                         else:
                             z = posterior.mode()
+                        if edit_mode:
+                            cond_posterior = vae.encode(batch[-1]).latent_dist 
+                            if config.sample_posterior:
+                                cond_z = cond_posterior.sample()
+                            else:
+                                cond_z = cond_posterior.mode()
 
             clean_images = z * config.scale_factor
+            if edit_mode:
+                cond_images = cond_z * config.scale_factor
             data_info = batch[3]
 
             if load_t5_feat:
@@ -175,7 +301,7 @@ def train():
             with accelerator.accumulate(model):
                 # Predict the noise residual
                 optimizer.zero_grad()
-                loss_term = train_diffusion.training_losses(model, clean_images, timesteps, model_kwargs=dict(y=y, mask=y_mask, data_info=data_info))
+                loss_term = train_diffusion.training_losses(model, clean_images, timesteps, model_kwargs=dict(y=y, mask=y_mask, data_info=data_info, cond_image=cond_images if edit_mode else None ))
                 loss = loss_term['loss'].mean()
                 accelerator.backward(loss)
                 if accelerator.sync_gradients:
@@ -225,7 +351,11 @@ def train():
             if config.visualize and (global_step % config.eval_sampling_steps == 0 or (step + 1) == 1):
                 accelerator.wait_for_everyone()
                 if accelerator.is_main_process:
-                    log_validation(model, global_step, device=accelerator.device, vae=vae)
+                    # pass
+                    if edit_mode:
+                        log_validation_edit(model, global_step, device=accelerator.device, vae=vae)
+                    else:
+                        log_validation(model, global_step, device=accelerator.device, vae=vae)
 
         if epoch % config.save_model_epochs == 0 or epoch == config.num_epochs:
             accelerator.wait_for_everyone()
@@ -324,6 +454,8 @@ if __name__ == '__main__':
         even_batches=even_batches,
         kwargs_handlers=[init_handler]
     )
+
+    edit_mode = config.get('edit_mode', False)
 
     log_name = 'train_log.log'
     if accelerator.is_main_process:
@@ -443,6 +575,17 @@ if __name__ == '__main__':
         train_dataloader = build_dataloader(dataset, batch_sampler=batch_sampler, num_workers=config.num_workers)
     else:
         train_dataloader = build_dataloader(dataset, num_workers=config.num_workers, batch_size=config.train_batch_size, shuffle=True)
+    if edit_mode:
+        set_data_root(config.test_data_root)
+        test_dataset = build_dataset(
+            config.test_data, resolution=image_size, aspect_ratio_type=config.aspect_ratio_type,
+            real_prompt_ratio=1.0, max_length=max_length, config=config,
+        )
+        assert config.multi_scale
+        test_batch_sampler = AspectRatioBatchSampler(sampler=RandomSampler(test_dataset), dataset=test_dataset,
+                                                        batch_size=config.train_batch_size, aspect_ratios=test_dataset.aspect_ratio, drop_last=False,
+                                                        ratio_nums=test_dataset.ratio_nums, config=config, valid_num=config.valid_num)
+        test_dataloader = build_dataloader(test_dataset, batch_sampler=test_batch_sampler, num_workers=config.num_workers)
 
     # build optimizer and lr scheduler
     lr_scale_ratio = 1
@@ -485,4 +628,6 @@ if __name__ == '__main__':
     # objects in the same order you gave them to the prepare method.
     model = accelerator.prepare(model)
     optimizer, train_dataloader, lr_scheduler = accelerator.prepare(optimizer, train_dataloader, lr_scheduler)
+    if edit_mode:
+        test_dataloader = accelerator.prepare(test_dataloader)
     train()

@@ -18,6 +18,8 @@ from diffusion.model.utils import auto_grad_checkpoint, to_2tuple
 from diffusion.model.nets.PixArt_blocks import t2i_modulate, CaptionEmbedder, AttentionKVCompress, MultiHeadCrossAttention, T2IFinalLayer, TimestepEmbedder, SizeEmbedder
 from diffusion.model.nets.PixArt import PixArt, get_2d_sincos_pos_embed
 
+from ipdb import set_trace as st
+
 
 class PatchEmbed(nn.Module):
     """ 2D Image to Patch Embedding
@@ -108,6 +110,8 @@ class PixArtMS(PixArt):
             micro_condition=False,
             qk_norm=False,
             kv_compress_config=None,
+            edit_mode=False, # 
+            cond_mode='channel', # 
             **kwargs,
     ):
         super().__init__(
@@ -127,6 +131,8 @@ class PixArtMS(PixArt):
             model_max_length=model_max_length,
             qk_norm=qk_norm,
             kv_compress_config=kv_compress_config,
+            edit_mode=edit_mode, # 
+            cond_mode=cond_mode, # 
             **kwargs,
         )
         self.h = self.w = 0
@@ -135,7 +141,7 @@ class PixArtMS(PixArt):
             nn.SiLU(),
             nn.Linear(hidden_size, 6 * hidden_size, bias=True)
         )
-        self.x_embedder = PatchEmbed(patch_size, in_channels, hidden_size, bias=True)
+        self.x_embedder = PatchEmbed(patch_size, self.in_channels, hidden_size, bias=True) # 
         self.y_embedder = CaptionEmbedder(in_channels=caption_channels, hidden_size=hidden_size, uncond_prob=class_dropout_prob, act_layer=approx_gelu, token_num=model_max_length)
         self.micro_conditioning = micro_condition
         if self.micro_conditioning:
@@ -162,7 +168,7 @@ class PixArtMS(PixArt):
 
         self.initialize()
 
-    def forward(self, x, timestep, y, mask=None, data_info=None, **kwargs):
+    def forward(self, x, timestep, y, mask=None, data_info=None, cond_image=None, **kwargs):
         """
         Forward pass of PixArt.
         x: (N, C, H, W) tensor of spatial inputs (images or latent representations of images)
@@ -179,10 +185,20 @@ class PixArtMS(PixArt):
                 self.pos_embed.shape[-1], (self.h, self.w), pe_interpolation=self.pe_interpolation,
                 base_size=self.base_size
             )
-        ).unsqueeze(0).to(x.device).to(self.dtype)
+        ).unsqueeze(0).to(x.device).to(self.dtype) # no grad! 
+
+        if self.edit_mode and self.cond_mode == 'channel':
+            # st()
+            assert cond_image is not None
+            x = torch.cat([x, cond_image], dim=1) # (N, C*2, H, W) 
 
         x = self.x_embedder(x) + pos_embed  # (N, T, D), where T = H * W / patch_size ** 2
         t = self.t_embedder(timestep)  # (N, D)
+
+        if self.edit_mode and self.cond_mode == 'self-attn':
+            # st()
+            cond_x = self.x_embedder(cond_image) + pos_embed # 
+            x = torch.cat([x, cond_x], dim=1)
 
         if self.micro_conditioning:
             c_size, ar = data_info['img_hw'].to(self.dtype), data_info['aspect_ratio'].to(self.dtype)
@@ -190,11 +206,25 @@ class PixArtMS(PixArt):
             ar = self.ar_embedder(ar, bs)  # (N, D)
             t = t + torch.cat([csize, ar], dim=1)
 
+        # st()
         t0 = self.t_block(t)
-        y = self.y_embedder(y, self.training)  # (N, D)
+        y = self.y_embedder(y, self.training)  # (N, 1, L, D)
 
-        if mask is not None:
-            if mask.shape[0] != y.shape[0]:
+        if self.edit_mode and self.cond_mode == 'cross-attn':
+            # st()
+            assert cond_image is not None
+            cond_x = self.x_embedder(cond_image) + pos_embed # (N, T, D)
+            if y.ndim > cond_x.ndim:
+                cond_x = cond_x.unsqueeze(1) # (N, 1, T, D)
+            y = torch.cat([y, cond_x], dim=-2) # (N, 1, L+T, D)
+            if mask is not None:
+                mask_cond = torch.ones((mask.shape[0], cond_x.shape[-2]), device=mask.device, dtype=mask.dtype) # (not always bs for inference)
+                while mask.ndim > mask_cond.ndim:
+                    mask_cond = mask_cond.unsqueeze(1)
+                mask = torch.cat([mask, mask_cond], dim=-1) # (N, 1, 1, L+T)
+
+        if mask is not None: # prompt tailing pad dropping!
+            if mask.shape[0] != y.shape[0]: # so like for prompt word dropping maybe? or what else?
                 mask = mask.repeat(y.shape[0] // mask.shape[0], 1)
             mask = mask.squeeze(1).squeeze(1)
             y = y.squeeze(1).masked_select(mask.unsqueeze(-1) != 0).view(1, -1, x.shape[-1])
@@ -202,32 +232,39 @@ class PixArtMS(PixArt):
         else:
             y_lens = [y.shape[2]] * y.shape[0]
             y = y.squeeze(1).view(1, -1, x.shape[-1])
+
         for block in self.blocks:
             x = auto_grad_checkpoint(block, x, y, t0, y_lens, (self.h, self.w), **kwargs)  # (N, T, D) #support grad checkpoint
 
         x = self.final_layer(x, t)  # (N, T, patch_size ** 2 * out_channels)
+
+        if self.edit_mode and self.cond_mode == 'self-attn':
+            # st()
+            x, cond_x = x.chunk(2, dim=1)
+
         x = self.unpatchify(x)  # (N, out_channels, H, W)
         
         return x
 
-    def forward_with_dpmsolver(self, x, timestep, y, data_info, **kwargs):
+    def forward_with_dpmsolver(self, x, timestep, y, data_info, cond_image=None, **kwargs):
         """
         dpm solver donnot need variance prediction
         """
         # https://github.com/openai/glide-text2im/blob/main/notebooks/text2im.ipynb
-        model_out = self.forward(x, timestep, y, data_info=data_info, **kwargs)
+        model_out = self.forward(x, timestep, y, data_info=data_info, cond_image=cond_image, **kwargs)
         return model_out.chunk(2, dim=1)[0]
 
-    def forward_with_cfg(self, x, timestep, y, cfg_scale, data_info, mask=None, **kwargs):
+    def forward_with_cfg(self, x, timestep, y, cfg_scale, data_info, mask=None, cond_image=None, **kwargs):
         """
         Forward pass of PixArt, but also batches the unconditional forward pass for classifier-free guidance.
         """
         # https://github.com/openai/glide-text2im/blob/main/notebooks/text2im.ipynb
         half = x[: len(x) // 2]
         combined = torch.cat([half, half], dim=0)
-        model_out = self.forward(combined, timestep, y, mask, data_info=data_info, **kwargs)
+        model_out = self.forward(combined, timestep, y, mask, data_info=data_info, cond_image=None, **kwargs)
         model_out = model_out['x'] if isinstance(model_out, dict) else model_out
         eps, rest = model_out[:, :3], model_out[:, 3:]
+        # 
         cond_eps, uncond_eps = torch.split(eps, len(eps) // 2, dim=0)
         half_eps = uncond_eps + cfg_scale * (cond_eps - uncond_eps)
         eps = torch.cat([half_eps, half_eps], dim=0)

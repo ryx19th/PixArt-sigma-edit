@@ -4,6 +4,8 @@ import torch
 
 from diffusion.utils.logger import get_root_logger
 
+from ipdb import set_trace as st
+
 
 def save_checkpoint(work_dir,
                     epoch,
@@ -67,6 +69,18 @@ def load_checkpoint(checkpoint,
     null_embed = torch.load(f'output/pretrained_models/null_embed_diffusers_{max_length}token.pth', map_location='cpu')
     state_dict['y_embedder.y_embedding'] = null_embed['uncond_prompt_embeds'][0]
 
+    logger = get_root_logger()
+
+    if model.edit_mode:
+        # st()
+        if state_dict["x_embedder.proj.weight"].shape != model.x_embedder.proj.weight.shape:
+            assert state_dict["x_embedder.proj.weight"].shape[1] * 2 == model.x_embedder.proj.weight.shape[1]
+            logger.info("Expand the x_embedder.proj.weight for edit mode.")
+            old_weight = state_dict["x_embedder.proj.weight"]
+            new_weight = torch.zeros_like(model.x_embedder.proj.weight, device=old_weight.device, dtype=old_weight.dtype)
+            new_weight[:, :old_weight.shape[1] ] = old_weight
+            state_dict["x_embedder.proj.weight"] = new_weight 
+
     missing, unexpect = model.load_state_dict(state_dict, strict=False)
     if model_ema is not None:
         model_ema.load_state_dict(checkpoint['state_dict_ema'], strict=False)
@@ -74,7 +88,6 @@ def load_checkpoint(checkpoint,
         optimizer.load_state_dict(checkpoint['optimizer'])
     if lr_scheduler is not None and resume_lr_scheduler:
         lr_scheduler.load_state_dict(checkpoint['scheduler'])
-    logger = get_root_logger()
     if optimizer is not None:
         epoch = checkpoint.get('epoch', re.match(r'.*epoch_(\d*).*.pth', ckpt_file).group()[0])
         logger.info(f'Resume checkpoint of epoch {epoch} from {ckpt_file}. Load ema: {load_ema}, '

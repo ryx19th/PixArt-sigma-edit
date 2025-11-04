@@ -7,7 +7,7 @@ use_fsdp=False   # if use FSDP mode
 valid_num=0      # take as valid aspect-ratio when sample number >= valid_num
 fp32_attention = True
 # model setting
-model = 'PixArt_XL_2'
+model = dict(type='PixArt_XL_2')
 aspect_ratio_type = None         # base aspect ratio [ASPECT_RATIO_512 or ASPECT_RATIO_256]
 multi_scale = False     # if use multiscale dataset model training
 pe_interpolation = 1.0    # positional embedding interpolation

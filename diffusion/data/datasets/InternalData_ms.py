@@ -10,6 +10,8 @@ import torchvision.transforms as T
 from torchvision.transforms.functional import InterpolationMode
 from diffusion.data.datasets.utils import *
 
+from ipdb import set_trace as st
+
 
 def get_closest_ratio(height: float, width: float, ratios: dict):
     aspect_ratio = height / width
@@ -187,6 +189,7 @@ class InternalDataMSSigma(InternalDataSigma):
                  real_prompt_ratio=1.0,
                  max_length=300,
                  config=None,
+                 edit_mode=False,
                  **kwargs):
         self.root = get_data_path(root)
         self.transform = transform
@@ -224,6 +227,11 @@ class InternalDataMSSigma(InternalDataSigma):
         logger.info(f"T5 max token length: {self.max_lenth}")
         logger.info(f"ratio of real user prompt: {self.real_prompt_ratio}")
 
+        self.edit_mode = edit_mode
+        if self.edit_mode:
+            logger.info("Entering edit mode.")
+            self.cond_img_samples = []
+
         image_list_json = image_list_json if isinstance(image_list_json, list) else [image_list_json]
         
         for json_file in image_list_json:
@@ -235,6 +243,10 @@ class InternalDataMSSigma(InternalDataSigma):
             self.img_samples.extend([
                 os.path.join(self.root.replace('InternData'+suffix, 'InternImgs'), item['path']) for item in meta_data_clean
             ])
+            if self.edit_mode:
+                self.cond_img_samples.extend([
+                    os.path.join(self.root.replace('InternData'+suffix, 'InternImgs'), item['path_src']) for item in meta_data_clean
+                ])
             self.txt_samples.extend([item['prompt'] for item in meta_data_clean])
             self.sharegpt4v_txt_samples.extend([item['sharegpt4v'] if 'sharegpt4v' in item else '' for item in meta_data_clean])
             self.txt_feat_samples.extend([
@@ -283,6 +295,8 @@ class InternalDataMSSigma(InternalDataSigma):
 
     def getdata(self, index):
         img_path = self.img_samples[index]
+        if self.edit_mode:
+            cond_img_path = self.cond_img_samples[index]
         real_prompt = random.random() < self.real_prompt_ratio
         npz_path = self.txt_feat_samples[index] if real_prompt else self.gpt4v_txt_feat_samples[index]
         txt = self.txt_samples[index] if real_prompt else self.sharegpt4v_txt_samples[index]
@@ -305,6 +319,10 @@ class InternalDataMSSigma(InternalDataSigma):
             img = self.loader(img_path)
             h, w = (img.size[1], img.size[0])
             assert h, w == (ori_h, ori_w)
+            if self.edit_mode:
+                cond_img = self.loader(cond_img_path)
+                h_, w_ = (cond_img.size[1], cond_img.size[0])
+                assert h_ == h and w_ == w
 
         data_info['img_hw'] = torch.tensor([ori_h, ori_w], dtype=torch.float32)
         data_info['aspect_ratio'] = closest_ratio
@@ -337,8 +355,14 @@ class InternalDataMSSigma(InternalDataSigma):
 
         if self.transform:
             img = self.transform(img)
+            if self.edit_mode:
+                # assert no random operation 
+                cond_img = self.transform(cond_img)
 
-        return img, txt_fea, attention_mask.to(torch.int16), data_info
+        if self.edit_mode:
+            return img, txt_fea, attention_mask.to(torch.int16), data_info, cond_img
+        else:
+            return img, txt_fea, attention_mask.to(torch.int16), data_info
 
     def __getitem__(self, idx):
         for _ in range(20):

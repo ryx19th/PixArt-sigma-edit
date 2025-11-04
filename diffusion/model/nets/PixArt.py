@@ -21,6 +21,8 @@ from diffusion.model.utils import auto_grad_checkpoint, to_2tuple
 from diffusion.model.nets.PixArt_blocks import t2i_modulate, CaptionEmbedder, AttentionKVCompress, MultiHeadCrossAttention, T2IFinalLayer, TimestepEmbedder, LabelEmbedder, FinalLayer
 from diffusion.utils.logger import get_root_logger
 
+from ipdb import set_trace as st
+
 
 class PixArtBlock(nn.Module):
     """
@@ -83,18 +85,24 @@ class PixArt(nn.Module):
             model_max_length=120,
             qk_norm=False,
             kv_compress_config=None,
+            edit_mode=False, # 
+            cond_mode='channel', # 
             **kwargs,
     ):
         super().__init__()
         self.pred_sigma = pred_sigma
-        self.in_channels = in_channels
         self.out_channels = in_channels * 2 if pred_sigma else in_channels
         self.patch_size = patch_size
         self.num_heads = num_heads
         self.pe_interpolation = pe_interpolation
         self.depth = depth
 
-        self.x_embedder = PatchEmbed(input_size, patch_size, in_channels, hidden_size, bias=True)
+        self.edit_mode = edit_mode # 
+        self.cond_mode = cond_mode # 
+        assert self.cond_mode in ['channel', 'cross-attn', 'self-attn'] 
+        self.in_channels = in_channels * (2 if self.edit_mode and self.cond_mode == 'channels' else 1)
+
+        self.x_embedder = PatchEmbed(input_size, patch_size, self.in_channels, hidden_size, bias=True) # 
         self.t_embedder = TimestepEmbedder(hidden_size)
         num_patches = self.x_embedder.num_patches
         self.base_size = input_size // self.patch_size
@@ -142,7 +150,7 @@ class PixArt(nn.Module):
             print(f"kv compress config: {self.kv_compress_config}")
 
 
-    def forward(self, x, timestep, y, mask=None, data_info=None, **kwargs):
+    def forward(self, x, timestep, y, mask=None, data_info=None, cond_image=None, **kwargs):
         """
         Forward pass of PixArt.
         x: (N, C, H, W) tensor of spatial inputs (images or latent representations of images)
@@ -155,6 +163,11 @@ class PixArt(nn.Module):
         pos_embed = self.pos_embed.to(self.dtype)
         self.h, self.w = x.shape[-2]//self.patch_size, x.shape[-1]//self.patch_size
         x = self.x_embedder(x) + pos_embed  # (N, T, D), where T = H * W / patch_size ** 2
+        if cond_image is not None:
+            st()
+            cond_x = self.x_embedder(cond_image) + pos_embed  # NOTE TODO Same embedder? Same pos embed? NOTE TODO # 
+            x = torch.cat([x, cond_x], dim=1) # (N, 2*T, D)
+            # x = torch.cat([x, cond_x], dim=2) # (N, T, 2*D) 
         t = self.t_embedder(timestep.to(x.dtype))  # (N, D)
         t0 = self.t_block(t)
         y = self.y_embedder(y, self.training)  # (N, 1, L, D)
@@ -173,24 +186,25 @@ class PixArt(nn.Module):
         x = self.unpatchify(x)  # (N, out_channels, H, W)
         return x
 
-    def forward_with_dpmsolver(self, x, timestep, y, mask=None, **kwargs):
+    def forward_with_dpmsolver(self, x, timestep, y, mask=None, cond_image=None, **kwargs):
         """
         dpm solver donnot need variance prediction
         """
         # https://github.com/openai/glide-text2im/blob/main/notebooks/text2im.ipynb
-        model_out = self.forward(x, timestep, y, mask)
+        model_out = self.forward(x, timestep, y, mask, cond_image=cond_image, **kwargs)
         return model_out.chunk(2, dim=1)[0]
 
-    def forward_with_cfg(self, x, timestep, y, cfg_scale, mask=None, **kwargs):
+    def forward_with_cfg(self, x, timestep, y, cfg_scale, mask=None, cond_image=None, **kwargs):
         """
         Forward pass of PixArt, but also batches the unconditional forward pass for classifier-free guidance.
         """
         # https://github.com/openai/glide-text2im/blob/main/notebooks/text2im.ipynb
         half = x[: len(x) // 2]
         combined = torch.cat([half, half], dim=0)
-        model_out = self.forward(combined, timestep, y, mask, kwargs)
+        model_out = self.forward(combined, timestep, y, mask, cond_image=cond_image, **kwargs)
         model_out = model_out['x'] if isinstance(model_out, dict) else model_out
         eps, rest = model_out[:, :3], model_out[:, 3:]
+        # 
         cond_eps, uncond_eps = torch.split(eps, len(eps) // 2, dim=0)
         half_eps = uncond_eps + cfg_scale * (cond_eps - uncond_eps)
         eps = torch.cat([half_eps, half_eps], dim=0)

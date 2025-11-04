@@ -28,3 +28,16 @@ def default_train(n_px):
         T.Normalize([.5], [.5]),
     ]
     return transform
+
+
+@register_transform
+def default_test(n_px):
+    transform = [
+        T.Lambda(lambda img: img.convert('RGB')),
+        T.Resize(n_px),  # Image.BICUBIC
+        T.CenterCrop(n_px),
+        # T.RandomHorizontalFlip(),
+        T.ToTensor(),
+        T.Normalize([.5], [.5]),
+    ]
+    return transform

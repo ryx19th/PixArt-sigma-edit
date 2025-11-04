@@ -11,6 +11,8 @@ from torchvision import transforms as T
 from diffusion.data.builder import get_data_path, DATASETS
 from diffusion.utils.logger import get_root_logger
 
+from ipdb import set_trace as st
+
 
 # helper function for replacing image extensions with an another
 def replace_img_ext(path, dst_ext: str) -> str:
@@ -33,6 +35,7 @@ class InternalData(Dataset):
                  load_mask_index=False,
                  max_length=120,
                  config=None,
+                 edit_mode=False,
                  **kwargs):
         self.root = get_data_path(root)
         self.transform = transform
@@ -49,6 +52,9 @@ class InternalData(Dataset):
         self.vae_feat_samples = []
         self.mask_index_samples = []
         self.prompt_samples = []
+
+        self.edit_mode = edit_mode
+        assert not self.edit_mode, "InternalData does not support edit data."
 
         image_list_json = image_list_json if isinstance(image_list_json, list) else [image_list_json]
         for json_file in image_list_json:
@@ -176,6 +182,7 @@ class InternalDataSigma(Dataset):
                  real_prompt_ratio=1.0,
                  max_length=300,
                  config=None,
+                 edit_mode=False,
                  **kwargs):
         self.root = get_data_path(root)
         self.transform = transform
@@ -202,6 +209,11 @@ class InternalDataSigma(Dataset):
         logger.info(f"T5 max token length: {self.max_lenth}")
         logger.info(f"ratio of real user prompt: {self.real_prompt_ratio}")
 
+        self.edit_mode = edit_mode
+        if self.edit_mode:
+            logger.info("Entering edit mode.")
+            self.cond_img_samples = []
+
         image_list_json = image_list_json if isinstance(image_list_json, list) else [image_list_json]
         for json_file in image_list_json:
             meta_data = self.load_json(os.path.join(self.root, json_file))
@@ -212,6 +224,10 @@ class InternalDataSigma(Dataset):
             self.img_samples.extend([
                 os.path.join(self.root.replace('InternData', 'InternImgs'), item['path']) for item in meta_data_clean
             ])
+            if self.edit_mode:
+                self.cond_img_samples.extend([
+                    os.path.join(self.root.replace('InternData', 'InternImgs'), item['path_src']) for item in meta_data_clean
+                ])
             self.txt_samples.extend([item['prompt'] for item in meta_data_clean])
             self.sharegpt4v_txt_samples.extend([item['sharegpt4v'] if 'sharegpt4v' in item else '' for item in meta_data_clean])
             self.txt_feat_samples.extend([
@@ -249,6 +265,8 @@ class InternalDataSigma(Dataset):
 
     def getdata(self, index):
         img_path = self.img_samples[index]
+        if self.edit_mode:
+            cond_img_path = self.cond_img_samples[index]
         real_prompt = random.random() < self.real_prompt_ratio
         npz_path = self.txt_feat_samples[index] if real_prompt else self.gpt4v_txt_feat_samples[index]
         txt = self.txt_samples[index] if real_prompt else self.sharegpt4v_txt_samples[index]
@@ -260,6 +278,8 @@ class InternalDataSigma(Dataset):
             img = self.loader(npy_path)
         else:
             img = self.loader(img_path)
+            if self.edit_mode:
+                cond_img = self.loader(cond_img_path)
 
         attention_mask = torch.ones(1, 1, self.max_lenth)     # 1x1xT
         if self.load_t5_feat:
@@ -275,9 +295,15 @@ class InternalDataSigma(Dataset):
 
         if self.transform:
             img = self.transform(img)
+            if self.edit_mode:
+                # assert no random operation 
+                cond_img = self.transform(cond_img)
 
         data_info["mask_type"] = self.mask_type
-        return img, txt_fea, attention_mask.to(torch.int16), data_info
+        if self.edit_mode:
+            return img, txt_fea, attention_mask.to(torch.int16), data_info, cond_img
+        else:
+            return img, txt_fea, attention_mask.to(torch.int16), data_info
 
     def __getitem__(self, idx):
         for _ in range(20):
@@ -319,6 +345,8 @@ class InternalDataSigma(Dataset):
     def sample_subset(self, ratio):
         sampled_idx = random.sample(list(range(len(self))), int(len(self) * ratio))
         self.img_samples = [self.img_samples[i] for i in sampled_idx]
+        if self.edit_mode:
+            self.cond_img_samples = [self.cond_img_samples[i] for i in sampled_idx]
 
     def __len__(self):
         return len(self.img_samples)
