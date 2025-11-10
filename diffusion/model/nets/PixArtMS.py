@@ -141,6 +141,7 @@ class PixArtMS(PixArt):
             nn.SiLU(),
             nn.Linear(hidden_size, 6 * hidden_size, bias=True)
         )
+
         self.x_embedder = PatchEmbed(patch_size, self.in_channels, hidden_size, bias=True) # 
         self.y_embedder = CaptionEmbedder(in_channels=caption_channels, hidden_size=hidden_size, uncond_prob=class_dropout_prob, act_layer=approx_gelu, token_num=model_max_length)
         self.micro_conditioning = micro_condition

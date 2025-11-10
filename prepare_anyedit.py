@@ -296,9 +296,9 @@ def main():
                 results.append({
                     "height": int(h), "width": int(w),
                     "ratio": float(w / h) if h else None,
-                    "path": meta["src_name"],
+                    "path_src": meta["src_name"],
                     "prompt": meta["prompt"],
-                    "path_edit": meta["tgt_name"],
+                    "path": meta["tgt_name"],
                 })
                 finished += 1
                 drained += 1
@@ -345,7 +345,7 @@ def main():
         if os.path.exists(src_out) and os.path.exists(tgt_out):
             w, h = get_size(src_out)
             results.append({"height": int(h), "width": int(w), "ratio": float(w / h) if h else None,
-                            "path": src_name, "prompt": prompt, "path_edit": tgt_name})
+                            "path_src": src_name, "prompt": prompt, "path": tgt_name})
             finished += 1
             kept_counter += 1
             if finished % args.log_every == 0 or (time.time() - last_flush_time >= args.flush_secs):
@@ -419,7 +419,7 @@ def main():
             except OSError: pass
         meta = fut.meta
         results.append({"height": int(h), "width": int(w), "ratio": float(w / h) if h else None,
-                        "path": meta["src_name"], "prompt": meta["prompt"], "path_edit": meta["tgt_name"]})
+                        "path_src": meta["src_name"], "prompt": meta["prompt"], "path": meta["tgt_name"]})
         finished += 1
         if finished % args.log_every == 0 or (time.time() - last_flush_time >= args.flush_secs):
             elapsed = time.time() - start

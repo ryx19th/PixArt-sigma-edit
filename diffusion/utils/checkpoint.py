@@ -74,7 +74,7 @@ def load_checkpoint(checkpoint,
     if model.edit_mode:
         # st()
         if state_dict["x_embedder.proj.weight"].shape != model.x_embedder.proj.weight.shape:
-            assert state_dict["x_embedder.proj.weight"].shape[1] * 2 == model.x_embedder.proj.weight.shape[1]
+            assert state_dict["x_embedder.proj.weight"].shape[1] * 2 == model.x_embedder.proj.weight.shape[1], f"Shape mismatch: state_dict has {state_dict['x_embedder.proj.weight'].shape} vs model has {model.x_embedder.proj.weight.shape}"
             logger.info("Expand the x_embedder.proj.weight for edit mode.")
             old_weight = state_dict["x_embedder.proj.weight"]
             new_weight = torch.zeros_like(model.x_embedder.proj.weight, device=old_weight.device, dtype=old_weight.dtype)

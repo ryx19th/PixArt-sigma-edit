@@ -100,7 +100,7 @@ class PixArt(nn.Module):
         self.edit_mode = edit_mode # 
         self.cond_mode = cond_mode # 
         assert self.cond_mode in ['channel', 'cross-attn', 'self-attn'] 
-        self.in_channels = in_channels * (2 if self.edit_mode and self.cond_mode == 'channels' else 1)
+        self.in_channels = in_channels * (2 if self.edit_mode and self.cond_mode == 'channel' else 1)
 
         self.x_embedder = PatchEmbed(input_size, patch_size, self.in_channels, hidden_size, bias=True) # 
         self.t_embedder = TimestepEmbedder(hidden_size)

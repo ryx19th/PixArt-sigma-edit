@@ -15,7 +15,7 @@ test_data = dict(
 )
 image_size = 512
 
-cond_mode = 'self-attn' # 'cross-attn' # 'channel' # ['channel', 'cross-attn', 'self-attn'] # 
+cond_mode = 'channel' # 'self-attn' # 'cross-attn' # ['channel', 'cross-attn', 'self-attn'] # 
 
 # model setting
 model = dict(
@@ -45,7 +45,7 @@ visualize = True
 log_interval = 10
 save_model_epochs = 1
 save_model_steps = 200
-work_dir = 'output/anyedit_edit_all_s'
+work_dir = 'output/anyedit_edit_all'
 
 # pixart-sigma
 scale_factor = 0.13025
